@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isNodeError } from '../utils/errors.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -13,26 +14,21 @@ import * as path from 'path';
  * in a single session.
  */
 export class WorkspaceContext {
-  private directories: Set<string>;
-
+  private directories = new Set<string>();
   private initialDirectories: Set<string>;
 
   /**
    * Creates a new WorkspaceContext with the given initial directory and optional additional directories.
-   * @param initialDirectory The initial working directory (usually cwd)
+   * @param directory The initial working directory (usually cwd)
    * @param additionalDirectories Optional array of additional directories to include
    */
-  constructor(initialDirectory: string, additionalDirectories: string[] = []) {
-    this.directories = new Set<string>();
-    this.initialDirectories = new Set<string>();
-
-    this.addDirectoryInternal(initialDirectory);
-    this.addInitialDirectoryInternal(initialDirectory);
-
-    for (const dir of additionalDirectories) {
-      this.addDirectoryInternal(dir);
-      this.addInitialDirectoryInternal(dir);
+  constructor(directory: string, additionalDirectories: string[] = []) {
+    this.addDirectory(directory);
+    for (const additionalDirectory of additionalDirectories) {
+      this.addDirectory(additionalDirectory);
     }
+
+    this.initialDirectories = new Set(this.directories);
   }
 
   /**
@@ -41,64 +37,25 @@ export class WorkspaceContext {
    * @param basePath Optional base path for resolving relative paths (defaults to cwd)
    */
   addDirectory(directory: string, basePath: string = process.cwd()): void {
-    this.addDirectoryInternal(directory, basePath);
+    this.directories.add(this.resolveAndValidateDir(directory, basePath));
   }
 
-  /**
-   * Internal method to add a directory with validation.
-   */
-  private addDirectoryInternal(
+  private resolveAndValidateDir(
     directory: string,
     basePath: string = process.cwd(),
-  ): void {
-    const absolutePath = path.isAbsolute(directory)
-      ? directory
-      : path.resolve(basePath, directory);
+  ): string {
+    const absolutePath = path.resolve(basePath, directory);
+    const fullyResolvedPath = this.fullyResolvedPath(absolutePath);
 
-    if (!fs.existsSync(absolutePath)) {
-      throw new Error(`Directory does not exist: ${absolutePath}`);
+    if (!fs.existsSync(fullyResolvedPath)) {
+      throw new Error(`Directory does not exist: ${fullyResolvedPath}`);
     }
-
-    const stats = fs.statSync(absolutePath);
+    const stats = fs.statSync(fullyResolvedPath);
     if (!stats.isDirectory()) {
-      throw new Error(`Path is not a directory: ${absolutePath}`);
+      throw new Error(`Path is not a directory: ${fullyResolvedPath}`);
     }
 
-    let realPath: string;
-    try {
-      realPath = fs.realpathSync(absolutePath);
-    } catch (_error) {
-      throw new Error(`Failed to resolve path: ${absolutePath}`);
-    }
-
-    this.directories.add(realPath);
-  }
-
-  private addInitialDirectoryInternal(
-    directory: string,
-    basePath: string = process.cwd(),
-  ): void {
-    const absolutePath = path.isAbsolute(directory)
-      ? directory
-      : path.resolve(basePath, directory);
-
-    if (!fs.existsSync(absolutePath)) {
-      throw new Error(`Directory does not exist: ${absolutePath}`);
-    }
-
-    const stats = fs.statSync(absolutePath);
-    if (!stats.isDirectory()) {
-      throw new Error(`Path is not a directory: ${absolutePath}`);
-    }
-
-    let realPath: string;
-    try {
-      realPath = fs.realpathSync(absolutePath);
-    } catch (_error) {
-      throw new Error(`Failed to resolve path: ${absolutePath}`);
-    }
-
-    this.initialDirectories.add(realPath);
+    return fullyResolvedPath;
   }
 
   /**
@@ -116,7 +73,7 @@ export class WorkspaceContext {
   setDirectories(directories: readonly string[]): void {
     this.directories.clear();
     for (const dir of directories) {
-      this.addDirectoryInternal(dir);
+      this.addDirectory(dir);
     }
   }
 
@@ -127,26 +84,33 @@ export class WorkspaceContext {
    */
   isPathWithinWorkspace(pathToCheck: string): boolean {
     try {
-      const absolutePath = path.resolve(pathToCheck);
-
-      let resolvedPath = absolutePath;
-      if (fs.existsSync(absolutePath)) {
-        try {
-          resolvedPath = fs.realpathSync(absolutePath);
-        } catch (_error) {
-          return false;
-        }
-      }
+      const fullyResolvedPath = this.fullyResolvedPath(pathToCheck);
 
       for (const dir of this.directories) {
-        if (this.isPathWithinRoot(resolvedPath, dir)) {
+        if (this.isPathWithinRoot(fullyResolvedPath, dir)) {
           return true;
         }
       }
-
       return false;
     } catch (_error) {
       return false;
+    }
+  }
+
+  /**
+   * Fully resolves a path, including symbolic links.
+   * If the path does not exist, it returns the fully resolved path as it would be
+   * if it did exist.
+   */
+  private fullyResolvedPath(pathToCheck: string): string {
+    try {
+      return fs.realpathSync(pathToCheck);
+    } catch (e: unknown) {
+      if (isNodeError(e) && e.code === 'ENOENT' && e.path) {
+        // If it doesn't exist, e.path contains the fully resolved path.
+        return e.path;
+      }
+      throw e;
     }
   }
 
